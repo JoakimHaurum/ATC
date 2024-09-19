@@ -2,11 +2,11 @@
 
 ![Agglomerative Token Clustering (ATC) method builds clusters locally, i.e. by iteratively combining the most similar tokens, until the desired amount of tokens remain. A step of this process is shown here, where a graph of nodes (in this case, tokens) are connected with edges based on their similarity. The most similar pair of nodes (highlighted in blue) are combined, and the edges are updated using linkage function D, in this case the "complete" linkage function.](./repo_images/ATC_steps.JPG)
 
-This repository is the official implementation of [Agglomerative Token Clustering](). 
+This repository is the official implementation of [Agglomerative Token Clustering](https://arxiv.org/abs/2409.11923). 
 
 We present Agglomerative Token Clustering (ATC), a novel token merging method that consistently outperforms previous token merging and pruning methods across image classification, image synthesis, and object detection & segmentation tasks. ATC merges clusters through bottom-up hierarchical clustering, without the introduction of extra learnable parameters.
 
-The project page can be found [here](http://vap.aau.dk/atc).
+The project page can be found [here](http://vap.aau.dk/atc). Model weights can be found [here](https://huggingface.co/joakimbh/ATC).
 
 ## Requirements
 

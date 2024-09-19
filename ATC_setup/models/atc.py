@@ -1,5 +1,3 @@
-import math
-from typing import Callable, Tuple, List, Union
 import numpy as np
 
 import logging
@@ -7,15 +5,12 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from timm.models.vision_transformer import VisionTransformer
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.layers import PatchEmbed, Mlp, DropPath
 
 from sklearn.cluster import AgglomerativeClustering
-#from scipy.cluster.hierarchy import fcluster
-#from scipy.cluster.hierarchy import linkage as linkage_fns
 
 _logger = logging.getLogger(__name__)
 
@@ -34,7 +29,7 @@ def _cfg(url='', **kwargs):
 
 
 class Attention_ToMe(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., scoring_method="K"):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -45,23 +40,13 @@ class Attention_ToMe(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        self.scoring_method = scoring_method
-
     def forward(self, x, size=None):
         B, N, C = x.shape
         
-        if self.scoring_method == "XPre":
-            metric = x.clone()
-
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
-        if self.scoring_method == "K":
-            metric = k.mean(1)
-        elif self.scoring_method == "Q":
-            metric = q.mean(1)            
-        elif self.scoring_method == "V":
-            metric = v.mean(1)        
+        metric = k.mean(1) 
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
@@ -77,9 +62,6 @@ class Attention_ToMe(nn.Module):
         
         x = self.proj(x)
         x = self.proj_drop(x)
-        
-        if self.scoring_method == "XPost":
-            metric = x.clone()
          
         return x, metric
 
@@ -87,10 +69,10 @@ class Attention_ToMe(nn.Module):
 class Block_ATC(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, num_clusters = 1, linkage = "average", cls_token = True, dist_token = False, scoring_method="K"):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, num_clusters = 1, linkage = "average", cls_token = True, dist_token = False):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention_ToMe(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop, scoring_method=scoring_method)
+        self.attn = Attention_ToMe(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -106,6 +88,7 @@ class Block_ATC(nn.Module):
         x_attn, metric = self.attn(self.norm1(x), attn_size)
         x = x + self.drop_path(x_attn)
         
+        cluster_assignment = None
         if self.num_clusters > 0:
             # Apply ToMe here
             merge, _, cluster_assignment = agglomerative_clustering(
@@ -169,18 +152,18 @@ class AgglomerativeClusteringVisionTransformer(VisionTransformer):
 
 
         token_ratio = args.reduction_ratio
-        pruning_loc = args.reduction_loc
+        reduction_loc = args.reduction_loc
         linkage = args.linkage
         
         if len(token_ratio) == 1:
-            token_ratio = [int(self.patch_embed.num_patches * token_ratio[0] ** (idx+1)) for idx in range(len(pruning_loc))]
+            token_ratio = [int(self.patch_embed.num_patches * token_ratio[0] ** (idx+1)) for idx in range(len(reduction_loc))]
         
-        assert len(token_ratio) == len(pruning_loc), f"Mismatch between the pruning location ({pruning_loc}) and token ratios ({token_ratio})"
-        print(token_ratio, pruning_loc)
+        assert len(token_ratio) == len(reduction_loc), f"Mismatch between the reduction location ({reduction_loc}) and token ratios ({token_ratio})"
+        print(token_ratio, reduction_loc)
 
 
         token_ratio_full = [0 for _ in range(depth)]
-        for idx, loc in enumerate(pruning_loc):
+        for idx, loc in enumerate(reduction_loc):
             token_ratio_full[loc] = token_ratio[idx]
 
         del(self.blocks)
@@ -192,12 +175,12 @@ class AgglomerativeClusteringVisionTransformer(VisionTransformer):
         self.blocks = nn.ModuleList([
             Block_ATC(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, num_clusters=token_ratio_full[i], linkage=linkage, scoring_method=args.scoring_method)
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, num_clusters=token_ratio_full[i], linkage=linkage)
             for i in range(depth)])
 
         self.deit_distillation = distilled
 
-        self.pruning_loc = pruning_loc
+        self.reduction_loc = reduction_loc
         self.token_ratio = token_ratio
         self.prop_attn = args.proportional_attn
         
@@ -209,7 +192,7 @@ class AgglomerativeClusteringVisionTransformer(VisionTransformer):
         return []
 
     def get_reduction_count(self):
-        return self.pruning_loc
+        return self.reduction_loc
 
     def forward(self, x):
         
@@ -229,7 +212,7 @@ class AgglomerativeClusteringVisionTransformer(VisionTransformer):
         for i, blk in enumerate(self.blocks):
             x, attn_size, cluster_assign = blk(x, attn_size)
             
-            if self.viz_mode and i in self.pruning_loc:
+            if self.viz_mode and i in self.reduction_loc:
                 assignments[i] = cluster_assign.clone().detach().cpu().numpy()
 
             if not self.prop_attn:
@@ -289,8 +272,6 @@ def agglomerative_clustering(
         cluster_labels = np.zeros((B,T),dtype=np.int64)
         for b_idx in range(B):
             labels = clustering.fit(scores[b_idx]).labels_
-            #Z = linkage_fns(scores[b_idx][upper_traingle_indexes], method = linkage)
-            #labels = fcluster(Z, t=Z[T-num_clusters-1, 2], criterion="distance") - 1
             cluster_labels[b_idx] = labels
             
         cluster_labels = torch.from_numpy(cluster_labels).to(device = metric.device)
@@ -349,7 +330,7 @@ if __name__ == "__main__":
     import time
 
 
-    merge, _ = agglomerative_clustering(metric, n_clusters, class_token=True)
+    merge, _, _ = agglomerative_clustering(metric, n_clusters, class_token=True)
 
     print(x_attn)
     x, attn_size = merge_wavg(merge, x_attn, attn_size)
